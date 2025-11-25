@@ -36,9 +36,13 @@ public:
     EngineSimWrapper() = default;
     ~EngineSimWrapper() {
         if (initialized) {
-            simulator.endAudioRenderingThread();
+            if (audioThreadStarted) {
+                simulator.endAudioRenderingThread();
+                audioThreadStarted = false;
+            }
             simulator.destroy();
             audioBuffer.destroy();
+            initialized = false;
         }
     }
 };
