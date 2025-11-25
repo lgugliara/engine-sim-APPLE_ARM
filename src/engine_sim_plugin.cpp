@@ -1,10 +1,11 @@
 #include "../include/engine_sim_plugin.h"
-#include "../include/engine_sim_application.h"
 #include "../include/simulator.h"
 #include "../include/engine.h"
 #include "../include/transmission.h"
 #include "../include/vehicle.h"
 #include "../include/synthesizer.h"
+#include "../include/audio_buffer.h"
+#include "../include/units.h"
 #include "../scripting/include/compiler.h"
 
 #include <string>
@@ -17,12 +18,14 @@
 
 class EngineSimWrapper {
 public:
-    EngineSimApplication app;
+    Simulator simulator;
+    AudioBuffer audioBuffer;
     Engine* engine = nullptr;
     Vehicle* vehicle = nullptr;
     Transmission* transmission = nullptr;
     std::string lastError;
     bool initialized = false;
+    bool audioThreadStarted = false;
     
     // Stato precedente per gestire i toggle
     bool prevDynoToggle = false;
@@ -33,7 +36,9 @@ public:
     EngineSimWrapper() = default;
     ~EngineSimWrapper() {
         if (initialized) {
-            app.destroy();
+            simulator.endAudioRenderingThread();
+            simulator.destroy();
+            audioBuffer.destroy();
         }
     }
 };
@@ -61,7 +66,11 @@ ENGINE_SIM_API EngineSimHandle EngineSimCreate(const char* configPath) {
         auto* wrapper = new EngineSimWrapper();
         SetError("");
         
-        // Carica il motore dallo script se fornito
+        // Initialize audio buffer for headless operation
+        wrapper->audioBuffer.initialize(44100, 44100);
+        wrapper->audioBuffer.m_writePointer = (int)(44100 * 0.1);
+        
+        // Load engine from script if provided
         if (configPath != nullptr && configPath[0] != '\0') {
             if (!EngineSimLoadEngine(wrapper, configPath)) {
                 delete wrapper;
@@ -83,16 +92,7 @@ ENGINE_SIM_API void EngineSimDestroy(EngineSimHandle handle) {
     
     try {
         auto* wrapper = GetWrapper(handle);
-        
-        // Stop audio thread prima di distruggere
-        if (wrapper->initialized) {
-            Simulator* sim = wrapper->app.getSimulator();
-            if (sim && sim->getEngine() != nullptr) {
-                sim->endAudioRenderingThread();
-            }
-        }
-        
-        delete wrapper;
+        delete wrapper;  // Destructor handles cleanup
     }
     catch (const std::exception& e) {
         SetError(std::string("Failed to destroy engine sim: ") + e.what());
@@ -106,15 +106,7 @@ ENGINE_SIM_API bool EngineSimInitializeAudio(EngineSimHandle handle, int sampleR
     }
     
     try {
-        auto* wrapper = GetWrapper(handle);
-        
-        // Avvia il thread audio se il motore è caricato
-        Simulator* sim = wrapper->app.getSimulator();
-        if (sim && sim->getEngine() != nullptr) {
-            sim->startAudioRenderingThread();
-        }
-        
-        wrapper->initialized = true;
+        // Audio thread started after loadSimulation in EngineSimLoadEngine
         return true;
     }
     catch (const std::exception& e) {
@@ -128,50 +120,50 @@ ENGINE_SIM_API void EngineSimUpdate(
     float deltaTime, 
     const EngineSimControlInput* input)
 {
+    
     if (!handle || !input) return;
     
     try {
+        
         auto* wrapper = GetWrapper(handle);
         if (!wrapper->initialized) return;
         
-        Simulator* sim = wrapper->app.getSimulator();
+        
+        Simulator* sim = &wrapper->simulator;
         if (!sim) return;
+        
         
         Engine* engine = sim->getEngine();
         if (!engine) return;
         
+        
         Transmission* trans = sim->getTransmission();
+        
         
         // ---- THROTTLE ----
         engine->setSpeedControl(input->throttle);
         
+        
+        
         // ---- STARTER MOTOR ----
         sim->m_starterMotor.m_enabled = input->starterMotor;
         
+        
+        
         // ---- IGNITION (toggle) ----
         IgnitionModule* ignitionModule = engine->getIgnitionModule();
-        bool shouldToggle = input->ignition && !wrapper->prevIgnitionToggle;
-        
-        if (ignitionModule == nullptr) {
-            fprintf(stderr, "[EngineSimPlugin] ERROR: IgnitionModule is NULL!\n");
-            fflush(stderr);
-        } else {
-            fprintf(stderr, "[EngineSimPlugin] input=%d prev=%d shouldToggle=%d\n", 
-                    input->ignition, wrapper->prevIgnitionToggle, shouldToggle);
-            fflush(stderr);
+        if (ignitionModule != nullptr) {
+            bool shouldToggle = input->ignition && !wrapper->prevIgnitionToggle;
             if (shouldToggle) {
-                bool oldState = ignitionModule->m_enabled;
-                ignitionModule->m_enabled = !oldState;
-                fprintf(stderr, "[EngineSimPlugin] Ignition toggled: %s -> %s\n",
-                       oldState ? "ON" : "OFF",
-                       ignitionModule->m_enabled ? "ON" : "OFF");
-                fflush(stderr);
+                ignitionModule->m_enabled = !ignitionModule->m_enabled;
             }
         }
         wrapper->prevIgnitionToggle = input->ignition;
         
+        
         // ---- TRANSMISSION ----
         if (trans) {
+            
             // Gear shift
             if (input->gearShift > 0 && wrapper->prevGearShift <= 0) {
                 trans->changeGear(trans->getGear() + 1);
@@ -181,9 +173,12 @@ ENGINE_SIM_API void EngineSimUpdate(
             }
             wrapper->prevGearShift = input->gearShift;
             
+            
             // Clutch
             trans->setClutchPressure(input->clutchPressure);
+            
         }
+        
         
         // ---- DYNAMOMETER ----
         if (input->dynoToggle && !wrapper->prevDynoToggle) {
@@ -200,16 +195,18 @@ ENGINE_SIM_API void EngineSimUpdate(
             sim->m_dyno.m_rotationSpeed = input->dynoSpeed * (2.0 * 3.14159265359 / 60.0); // RPM to rad/s
         }
         
+        
         // ---- AUDIO PARAMETERS ----
-        Synthesizer::AudioParameters audioParams = sim->getSynthesizer()->getAudioParameters();
-        audioParams.Volume = input->volume;
-        audioParams.Convolution = input->convolution;
-        audioParams.dF_F_mix = input->highFreqGain;
-        audioParams.AirNoise = input->lowFreqNoise;
-        audioParams.InputSampleNoise = input->highFreqNoise;
-        sim->getSynthesizer()->setAudioParameters(audioParams);
+        // NOTE: Audio parameters should NOT be modified during simulation updates
+        // because of race conditions with the audio rendering thread.
+        // Use EngineSimSetAudioParameters() instead if you need to change them.
         
         // ---- SIMULATION CONTROLS ----
+        if (input->simulationFrequency > 0.0f) {
+            sim->setSimulationFrequency(static_cast<int>(input->simulationFrequency));
+        }
+        
+        
         if (input->simulationFrequency > 0.0f) {
             sim->setSimulationFrequency(static_cast<int>(input->simulationFrequency));
         }
@@ -222,11 +219,14 @@ ENGINE_SIM_API void EngineSimUpdate(
         sim->setSimulationSpeed(1.0 / input->simulationSpeed);
         sim->startFrame(deltaTime);
         
+        
         while (sim->simulateStep()) {
             // Simula step by step
         }
         
+        
         sim->endFrame();
+        
         
     }
     catch (const std::exception& e) {
@@ -247,7 +247,7 @@ ENGINE_SIM_API bool EngineSimGetState(
         auto* wrapper = GetWrapper(handle);
         if (!wrapper->initialized) return false;
         
-        Simulator* sim = wrapper->app.getSimulator();
+        Simulator* sim = &wrapper->simulator;
         if (!sim) return false;
         
         Engine* engine = sim->getEngine();
@@ -280,7 +280,8 @@ ENGINE_SIM_API bool EngineSimGetState(
         
         // Engine state
         outState->isRunning = (outState->rpm > 100.0f);
-        outState->ignitionEnabled = engine->getIgnitionModule()->m_enabled;
+        IgnitionModule* ignitionModule = engine->getIgnitionModule();
+        outState->ignitionEnabled = (ignitionModule != nullptr) ? ignitionModule->m_enabled : false;
         outState->starterActive = sim->m_starterMotor.m_enabled;
         outState->dynoEnabled = sim->m_dyno.m_enabled;
         outState->dynoHold = sim->m_dyno.m_hold;
@@ -314,10 +315,7 @@ ENGINE_SIM_API int EngineSimReadAudio(
         auto* wrapper = GetWrapper(handle);
         if (!wrapper->initialized) return 0;
         
-        Simulator* sim = wrapper->app.getSimulator();
-        if (!sim) return 0;
-        
-        return sim->readAudioOutput(maxSamples, buffer);
+        return wrapper->simulator.readAudioOutput(maxSamples, buffer);
     }
     catch (const std::exception& e) {
         SetError(std::string("Failed to read audio: ") + e.what());
@@ -332,10 +330,7 @@ ENGINE_SIM_API int EngineSimGetAudioLatency(EngineSimHandle handle) {
         auto* wrapper = GetWrapper(handle);
         if (!wrapper->initialized) return 0;
         
-        Simulator* sim = wrapper->app.getSimulator();
-        if (!sim) return 0;
-        
-        return static_cast<int>(sim->getSynthesizerInputLatency());
+        return static_cast<int>(wrapper->simulator.getSynthesizerInputLatency());
     }
     catch (const std::exception& e) {
         SetError(std::string("Failed to get audio latency: ") + e.what());
@@ -355,8 +350,7 @@ ENGINE_SIM_API void EngineSimResetControls(EngineSimControlInput* input) {
 }
 
 ENGINE_SIM_API const char* EngineSimGetVersion(void) {
-    static std::string version = EngineSimApplication::getBuildVersion();
-    return version.c_str();
+    return "0.1.11a";  // Match the build version
 }
 
 ENGINE_SIM_API const char* EngineSimGetLastError(void) {
@@ -382,17 +376,82 @@ ENGINE_SIM_API bool EngineSimLoadEngine(
         
         if (compiled) {
             const es_script::Compiler::Output output = compiler.execute();
-            wrapper->app.configure(output.applicationSettings);
             
             wrapper->engine = output.engine;
             wrapper->vehicle = output.vehicle;
             wrapper->transmission = output.transmission;
             
-            wrapper->app.loadEngine(
-                output.engine, 
-                output.vehicle, 
-                output.transmission
-            );
+            // Clean up old simulation if it exists
+            wrapper->simulator.releaseSimulation();
+            
+            if (output.engine == nullptr) {
+                compiler.destroy();
+                SetError("Engine compilation produced null engine");
+                return false;
+            }
+            
+            // Create default vehicle if not provided
+            if (wrapper->vehicle == nullptr) {
+                Vehicle::Parameters vehParams;
+                vehParams.mass = units::mass(1597, units::kg);
+                vehParams.diffRatio = 3.42;
+                vehParams.tireRadius = units::distance(10, units::inch);
+                vehParams.dragCoefficient = 0.25;
+                vehParams.crossSectionArea = units::distance(6.0, units::foot) * units::distance(6.0, units::foot);
+                vehParams.rollingResistance = 2000.0;
+                wrapper->vehicle = new Vehicle;
+                wrapper->vehicle->initialize(vehParams);
+            }
+            
+            // Create default transmission if not provided
+            if (wrapper->transmission == nullptr) {
+                const double gearRatios[] = { 2.97, 2.07, 1.43, 1.00, 0.84, 0.56 };
+                Transmission::Parameters tParams;
+                tParams.GearCount = 6;
+                tParams.GearRatios = gearRatios;
+                tParams.MaxClutchTorque = units::torque(1000.0, units::ft_lb);
+                wrapper->transmission = new Transmission;
+                wrapper->transmission->initialize(tParams);
+            }
+            
+            // Calculate displacement
+            output.engine->calculateDisplacement();
+            
+            // Initialize simulator
+            try {
+                wrapper->simulator.setFluidSimulationSteps(8);
+                wrapper->simulator.setSimulationFrequency(output.engine->getSimulationFrequency());
+                
+                Simulator::Parameters simulatorParams;
+                simulatorParams.SystemType = Simulator::SystemType::NsvOptimized;
+                wrapper->simulator.initialize(simulatorParams);
+                wrapper->simulator.loadSimulation(wrapper->engine, wrapper->vehicle, wrapper->transmission);
+                
+                // CRITICAL: Initialize impulse responses BEFORE starting audio thread
+                // to prevent heap-buffer-overflow in ConvolutionFilter.
+                // ConvolutionFilter expects valid impulse response data even in headless mode.
+                for (int i = 0; i < output.engine->getExhaustSystemCount(); ++i) {
+                    constexpr int dummySize = 1024;
+                    static int16_t dummyIR[dummySize] = {0};
+                    wrapper->simulator.getSynthesizer()->initializeImpulseResponse(
+                        dummyIR, dummySize, 0.0, i
+                    );
+                }
+                
+                // Disable convolution for headless operation
+                Synthesizer::AudioParameters audioParams = wrapper->simulator.getSynthesizer()->getAudioParameters();
+                audioParams.Convolution = 0.0;
+                wrapper->simulator.getSynthesizer()->setAudioParameters(audioParams);
+                
+                // Start audio rendering thread after all initialization is complete
+                wrapper->simulator.startAudioRenderingThread();
+                wrapper->audioThreadStarted = true;
+            }
+            catch (const std::exception& e) {
+                compiler.destroy();
+                SetError(std::string("Simulator initialization failed: ") + e.what());
+                return false;
+            }
             
             compiler.destroy();
             return true;
@@ -425,14 +484,11 @@ ENGINE_SIM_API void EngineSimSetAudioParameters(
         auto* wrapper = GetWrapper(handle);
         if (!wrapper->initialized) return;
         
-        Simulator* sim = wrapper->app.getSimulator();
-        if (!sim) return;
-        
-        Synthesizer::AudioParameters audioParams = sim->getSynthesizer()->getAudioParameters();
+        Synthesizer::AudioParameters audioParams = wrapper->simulator.getSynthesizer()->getAudioParameters();
         audioParams.Volume = volume;
         audioParams.Convolution = convolution;
         audioParams.dF_F_mix = highFreqGain;
-        sim->getSynthesizer()->setAudioParameters(audioParams);
+        wrapper->simulator.getSynthesizer()->setAudioParameters(audioParams);
     }
     catch (const std::exception& e) {
         SetError(std::string("Failed to set audio parameters: ") + e.what());
