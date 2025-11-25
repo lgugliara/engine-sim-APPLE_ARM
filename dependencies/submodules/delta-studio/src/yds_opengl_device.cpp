@@ -13,6 +13,7 @@
 #endif
 
 #include "OpenGL.h"
+#include <cassert>
 #include <SDL.h>
 #include <SDL_image.h>
 
