@@ -204,6 +204,135 @@ if (PIRANHA_ENABLED)
         piranha)
 endif (PIRANHA_ENABLED)
 
+set(LIBRARY_NAME engine-sim-plugin)
+add_library(${LIBRARY_NAME} SHARED
+    # Plugin API source file
+    src/engine_sim_plugin.cpp
+
+    # Application source files (needed for the wrapper)
+    src/engine_sim_application.cpp
+    src/geometry_generator.cpp
+    src/simulation_object.cpp
+    src/piston_object.cpp
+    src/connecting_rod_object.cpp
+    src/ui_element.cpp
+    src/ui_manager.cpp
+    src/cylinder_pressure_gauge.cpp
+    src/ui_math.cpp
+    src/gauge.cpp
+    src/crankshaft_object.cpp
+    src/cylinder_bank_object.cpp
+    src/cylinder_head_object.cpp
+    src/ui_button.cpp
+    src/ui_utilities.cpp
+    src/combustion_chamber_object.cpp
+    src/oscilloscope.cpp
+    src/shaders.cpp
+    src/engine_view.cpp
+    src/right_gauge_cluster.cpp
+    src/cylinder_temperature_gauge.cpp
+    src/labeled_gauge.cpp
+    src/throttle_display.cpp
+    src/afr_cluster.cpp
+    src/fuel_cluster.cpp
+    src/oscilloscope_cluster.cpp
+    src/performance_cluster.cpp
+    src/firing_order_display.cpp
+    src/load_simulation_cluster.cpp
+    src/mixer_cluster.cpp
+    src/info_cluster.cpp
+
+    # Plugin API header
+    include/engine_sim_plugin.h
+    
+    # Application include files
+    include/engine_sim_application.h
+    include/geometry_generator.h
+    include/simulation_object.h
+    include/piston_object.h
+    include/connecting_rod_object.h
+    include/ui_element.h
+    include/ui_manager.h
+    include/cylinder_pressure_gauge.h
+    include/ui_math.h
+    include/crankshaft_object.h
+    include/cylinder_bank_object.h
+    include/cylinder_head_object.h
+    include/ui_button.h
+    include/ui_utilities.h
+    include/combustion_chamber_object.h
+    include/oscilloscope.h
+    include/shaders.h
+    include/engine_view.h
+    include/right_gauge_cluster.h
+    include/cylinder_temperature_gauge.h
+    include/labeled_gauge.h
+    include/throttle_display.h
+    include/afr_cluster.h
+    include/fuel_cluster.h
+    include/oscilloscope_cluster.h
+    include/performance_cluster.h
+    include/firing_order_display.h
+    include/load_simulation_cluster.h
+    include/mixer_cluster.h
+    include/info_cluster.h
+    include/units.h
+)
+
+# Definizioni di compilazione per il plugin
+target_compile_definitions(${LIBRARY_NAME} PRIVATE
+    ENGINE_SIM_EXPORT  # Per esportare i simboli
+)
+
+if (DTV)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE
+        direct-to-video)
+endif (DTV)
+
+if (PIRANHA_ENABLED)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE
+        engine-sim-script-interpreter)
+endif (PIRANHA_ENABLED)
+
+if (DISCORD_ENABLED)
+    target_link_libraries(${LIBRARY_NAME} PRIVATE
+        discord
+        discord-rpc
+    )
+endif (DISCORD_ENABLED)
+
+# Link alle librerie necessarie
+target_link_libraries(${LIBRARY_NAME} PRIVATE
+    engine-sim
+)
+
+# Include directories
+target_include_directories(${LIBRARY_NAME}
+    PUBLIC 
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        dependencies/submodules
+)
+
+# Proprietà del target
+set_target_properties(${LIBRARY_NAME} PROPERTIES
+    OUTPUT_NAME "engine-sim-plugin"
+    SUFFIX ".bundle"
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_VISIBILITY_PRESET hidden  # Nascondi tutti i simboli di default
+    VISIBILITY_INLINES_HIDDEN ON
+    POSITION_INDEPENDENT_CODE ON  # Necessario per librerie condivise
+    MACOSX_RPATH ON
+)
+
+# Su macOS, imposta install_name per facilitare il caricamento dinamico
+if (APPLE)
+    set_target_properties(${LIBRARY_NAME} PROPERTIES
+        INSTALL_NAME_DIR "@rpath"
+        BUILD_WITH_INSTALL_RPATH ON
+    )
+endif()
+
 add_executable(engine-sim-app WIN32
     # Source files
     src/main.cpp
@@ -317,3 +446,18 @@ target_link_libraries(engine-sim-test
 
 include(GoogleTest)
 gtest_discover_tests(engine-sim-test)
+
+
+# ========================================================
+# Plugin library
+
+# set(LIBRARY_NAME engine-sim-plugin)
+# add_library(${LIBRARY_NAME} SHARED ...)
+# # target_compile_definitions(${LIBRARY_NAME} PRIVATE -fvisibility=default)
+# target_link_libraries(${LIBRARY_NAME} PRIVATE dl)
+# set_target_properties(${LIBRARY_NAME} PROPERTIES
+#     OUTPUT_NAME "engine-sim-plugin"
+#     SUFFIX ".bundle"
+# )
+
+# ========================================================
