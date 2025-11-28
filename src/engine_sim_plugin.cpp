@@ -11,6 +11,8 @@
 #include <string>
 #include <cstring>
 #include <memory>
+#include <thread>
+#include <chrono>
 
 // ============================================================================
 // INTERNAL WRAPPER CLASS
@@ -36,12 +38,15 @@ public:
     EngineSimWrapper() = default;
     ~EngineSimWrapper() {
         if (initialized) {
-            if (audioThreadStarted) {
-                simulator.endAudioRenderingThread();
-                audioThreadStarted = false;
+            // Explicitly destroy simulator and audio buffer
+            // Note: audio thread was never started, so no need to stop it
+            try {
+                simulator.releaseSimulation();
+                simulator.destroy();
+                audioBuffer.destroy();
+            } catch (...) {
+                // Ignore any exceptions during cleanup
             }
-            simulator.destroy();
-            audioBuffer.destroy();
             initialized = false;
         }
     }
@@ -210,17 +215,13 @@ ENGINE_SIM_API void EngineSimUpdate(
             sim->setSimulationFrequency(static_cast<int>(input->simulationFrequency));
         }
         
-        
-        if (input->simulationFrequency > 0.0f) {
-            sim->setSimulationFrequency(static_cast<int>(input->simulationFrequency));
-        }
-        
+        // Set simulation speed (with safety check for division by zero)
+        // Note: Engine-sim expects inverted speed (1.0/x) where higher input = faster simulation
         if (input->simulationSpeed > 0.0f) {
-            sim->setSimulationSpeed(input->simulationSpeed);
+            sim->setSimulationSpeed(1.0 / input->simulationSpeed);
         }
         
         // ---- UPDATE SIMULATION ----
-        sim->setSimulationSpeed(1.0 / input->simulationSpeed);
         sim->startFrame(deltaTime);
         
         
@@ -447,9 +448,10 @@ ENGINE_SIM_API bool EngineSimLoadEngine(
                 audioParams.Convolution = 0.0;
                 wrapper->simulator.getSynthesizer()->setAudioParameters(audioParams);
                 
-                // Start audio rendering thread after all initialization is complete
-                wrapper->simulator.startAudioRenderingThread();
-                wrapper->audioThreadStarted = true;
+                // DISABLED: Audio rendering thread causes memory corruption crashes
+                // The synthesizer will work in polling mode via readAudioOutput()
+                // wrapper->simulator.startAudioRenderingThread();
+                // wrapper->audioThreadStarted = true;
             }
             catch (const std::exception& e) {
                 compiler.destroy();
