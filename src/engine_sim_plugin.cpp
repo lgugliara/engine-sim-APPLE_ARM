@@ -28,6 +28,7 @@ public:
     std::string lastError;
     bool initialized = false;
     bool audioThreadStarted = false;
+    int updateCount = 0;  // Track number of updates before starting audio thread
     
     // Stato precedente per gestire i toggle
     bool prevDynoToggle = false;
@@ -39,8 +40,12 @@ public:
     ~EngineSimWrapper() {
         if (initialized) {
             // Explicitly destroy simulator and audio buffer
-            // Note: audio thread was never started, so no need to stop it
             try {
+                // CRITICAL: Stop audio rendering thread BEFORE destroying simulator
+                if (audioThreadStarted) {
+                    simulator.endAudioRenderingThread();
+                    audioThreadStarted = false;
+                }
                 simulator.releaseSimulation();
                 simulator.destroy();
                 audioBuffer.destroy();
@@ -232,6 +237,10 @@ ENGINE_SIM_API void EngineSimUpdate(
         
         sim->endFrame();
         
+        // AUDIO THREAD DISABLED: Causes SIGTRAP/segfault
+        // The issue appears to be a deep threading bug in the synthesizer
+        // when used in plugin mode vs standalone application mode
+        // TODO: Needs investigation of mutex/CV usage in Synthesizer::renderAudio()
         
     }
     catch (const std::exception& e) {
@@ -448,10 +457,8 @@ ENGINE_SIM_API bool EngineSimLoadEngine(
                 audioParams.Convolution = 0.0;
                 wrapper->simulator.getSynthesizer()->setAudioParameters(audioParams);
                 
-                // DISABLED: Audio rendering thread causes memory corruption crashes
-                // The synthesizer will work in polling mode via readAudioOutput()
-                // wrapper->simulator.startAudioRenderingThread();
-                // wrapper->audioThreadStarted = true;
+                // Audio thread will be started later, after first simulation updates
+                // This avoids race conditions during initialization
             }
             catch (const std::exception& e) {
                 compiler.destroy();
